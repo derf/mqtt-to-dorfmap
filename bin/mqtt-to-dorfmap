@@ -1,0 +1,151 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use 5.020;
+
+our $VERSION = '0.00';
+
+use File::Slurp qw(read_file write_file);
+use Net::MQTT::Simple;
+use YAML::XS;
+
+sub load_config {
+	my ($config_file) = @_;
+	my $content       = read_file($config_file);
+	my $yaml          = Load($content);
+	return $yaml;
+}
+
+sub slurp {
+	my ($file) = @_;
+
+	my $content = read_file( $file, err_mode => 'quiet' );
+	if ( defined $content ) {
+		chomp $content;
+	}
+	return $content;
+}
+
+sub spew {
+	my ( $file, $value ) = @_;
+
+	return write_file( $file, { err_mode => 'quiet' }, $value );
+}
+
+sub set_output {
+	my ( $device, $port, $value ) = @_;
+
+	spew( "/tmp/dmap/${device}/${port}", "${value}\n" );
+}
+
+sub get_output {
+	my ( $device, $port ) = @_;
+
+	return slurp("/tmp/dmap/${device}/${port}") ? 1 : 0;
+}
+
+my ($config_file) = @ARGV;
+
+if ( not defined $config_file ) {
+	die("Usage: $0 <config.yaml>\n");
+}
+
+my $user_config = load_config($config_file);
+my %config      = (
+	mqtt => $user_config->{mqtt},
+	host => $user_config->{host},
+);
+
+for my $subscription ( @{ $user_config->{devices} } ) {
+	$config{device}{ $subscription->{id} } = {};
+	for my $key (qw(alias aliases class)) {
+		if ( exists $subscription->{$key} ) {
+			$config{device}{ $subscription->{id} }{$key}
+			  = $subscription->{$key};
+		}
+	}
+}
+
+if ( not defined $config{mqtt}{server} ) {
+	die("Error: configuration must specify an mqtt server\n");
+}
+if ( not defined $config{host} ) {
+	die("Error: configuration must specify a host name\n");
+}
+
+my $mqtt = Net::MQTT::Simple->new( $config{mqtt}{server} );
+
+my %subscription;
+
+sub message_handler {
+	my ( $topic, $message ) = @_;
+
+	my ( undef, undef, undef, $device_id, $output ) = split( qr{ / }x, $topic );
+
+	if ( defined $output ) {
+
+		if ( exists $config{device}{$device_id}{aliases}{$output} ) {
+			$output = $config{device}{$device_id}{aliases}{$output};
+		}
+
+		set_output( $device_id, $output, $message );
+	}
+	else {
+		for my $command ( split( qr{ [[:space:]]+ }x, $message ) ) {
+			if ( $command
+				=~ m{ ^ (?<output> [^<=>]+ ) (?<operation> < | <= | = | >= | > ) (?<value> .+ ) $ }x
+			  )
+			{
+				my ( $cmd_out, $cmd_op, $cmd_value )
+				  = ( $+{output}, $+{op}, $+{value} );
+				if ( exists $config{device}{$device_id}{aliases}{$cmd_out} ) {
+					$cmd_out = $config{device}{$device_id}{aliases}{$cmd_out};
+				}
+				set_output( $device_id, $cmd_out, $cmd_value );
+			}
+		}
+	}
+
+	system( '/usr/local/lib/derfmap/si2c-write', $device_id );
+}
+
+$mqtt->run( "dmap/set/$config{host}/#" => \&message_handler );
+
+__END__
+
+=head1 NAME
+
+=head1 SYNOPSIS
+
+=head1 VERSION
+
+=head1 DESCRIPTION
+
+=head1 OPTIONS
+
+=over
+
+=back
+
+=head1 EXIT STATUS
+
+=head1 CONFIGURATION
+
+None.
+
+=head1 DEPENDENCIES
+
+=over
+
+=back
+
+=head1 BUGS AND LIMITATIONS
+
+=head1 AUTHOR
+
+Copyright (C) 2018 by Daniel Friesel E<lt>derf@finalrewind.orgE<gt>
+
+=head1 LICENSE
+
+  0. You just DO WHAT THE FUCK YOU WANT TO.
